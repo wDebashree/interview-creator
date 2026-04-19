@@ -16,45 +16,62 @@ const isLocal = window.location.hostname === "localhost" || window.location.host
 //   ? `http://${backendCanisterId}.localhost:4943/v1/process`
 //   : `https://${backendCanisterId}.icp0.io/v1/process`;
 
-export async function processJob(req: ProcessRequest): Promise<ProcessResponse> {
-  // Step 1: Extract Skills
+export interface QAItem {
+  question: string;
+  answer: string;
+}
+
+export interface QAGroup {
+  skill: string;
+  questions: QAItem[];
+}
+
+export async function processJob(req: any): Promise<any> { 
+  // 1. Extract Skills
   const extractRes = await fetch(`${BASE_URL}/v1/extract-skills`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
-
+  
   const extractData = await extractRes.json();
   if (extractData.error) throw new Error(extractData.message);
-
+  
   const skills: string[] = extractData.skills;
   const jobDescription: string = extractData.jobDescription;
-  const allQA = [];
+  
+  // Track tokens starting with the skill extraction
+  let totalTokensUsed = extractData.tokens || 0; 
+  
+  const allQA: QAGroup[] = [];
   const chunkSize = 3;
-
-  // Step 2: Batch Generate in Chunks
+  
+  // 2. Batch Generate in Chunks
   for (let i = 0; i < skills.length; i += chunkSize) {
     const chunk = skills.slice(i, i + chunkSize);
-
+    
     const generateRes = await fetch(`${BASE_URL}/v1/generate-qa`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        skills: chunk.join(","), // Pass as a comma-separated string
-        jobDescription
+      body: JSON.stringify({ 
+        skills: chunk.join(","), 
+        jobDescription 
       }),
     });
-
+    
     const generateData = await generateRes.json();
     if (generateData.error) {
        console.warn("Chunk failed, skipping:", generateData.message);
-       continue; // Skip failed chunk but keep processing the rest
+       continue;
     }
-
+    
     if (generateData.qa) {
       allQA.push(...generateData.qa);
+      // Add the tokens from this specific batch!
+      totalTokensUsed += (generateData.tokens || 0); 
     }
   }
-
-  return { qa: allQA };
+  
+  // Return the grand total alongside the Q&A
+  return { qa: allQA, tokens: totalTokensUsed };
 }

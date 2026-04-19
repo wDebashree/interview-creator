@@ -7,6 +7,8 @@ import JobParser "JobParser";
 import SkillExtractor "SkillExtractor";
 import QAGenerator "QAGenerator";
 import Iter "mo:base/Iter";
+import Utils "Utils";
+import Nat "mo:base/Nat";
 
 persistent actor class Backend(apiKey : Text) {
 //  public query func http_request(req : HttpRequest) : async HttpResponse {
@@ -35,8 +37,8 @@ persistent actor class Backend(apiKey : Text) {
       // --- ENDPOINT 1: Extract Skills ---
       if (path == "/v1/extract-skills") {
         let bodyStr = switch(Text.decodeUtf8(req.body)) { case (?b) b; case null "" };
-        let urlOpt = extractStringField(bodyStr, "url");
-        let textOpt = extractStringField(bodyStr, "text");
+        let urlOpt = Utils.extractStringField(bodyStr, "url");
+        let textOpt = Utils.extractStringField(bodyStr, "text");
         
         var jobDescription = "";
         if (urlOpt != null) {
@@ -67,7 +69,7 @@ persistent actor class Backend(apiKey : Text) {
         let skillsRes = await SkillExtractor.extract(jobDescription, apiKey);
         switch(skillsRes) {
           case (#err e) return errorResponse(422, e.error, e.message);
-          case (#ok { skills }) {
+          case (#ok { skills; tokens }) {
             var skillsArrJson = "[";
             var idx = 0;
             let len = skills.size();
@@ -83,7 +85,7 @@ persistent actor class Backend(apiKey : Text) {
             let escapedJd3 = Text.replace(escapedJd2, #text "\r", "\\r");
             let escapedJd4 = Text.replace(escapedJd3, #text "\t", "\\t");
 
-            return jsonResponse(200, "{\"skills\": " # skillsArrJson # ", \"jobDescription\": \"" # escapedJd4 # "\"}");
+            return jsonResponse(200, "{\"skills\": " # skillsArrJson # ", \"jobDescription\": \"" # escapedJd4 # "\", \"tokens\": " # Nat.toText(tokens) # "}");
           };
         };
       }
@@ -91,8 +93,8 @@ persistent actor class Backend(apiKey : Text) {
       // --- ENDPOINT 2: Generate QA (Batched) ---
       else if (path == "/v1/generate-qa") {
         let bodyStr = switch(Text.decodeUtf8(req.body)) { case (?b) b; case null "" };
-        let skillsStrOpt = extractStringField(bodyStr, "skills");
-        let jdOpt = extractStringField(bodyStr, "jobDescription");
+        let skillsStrOpt = Utils.extractStringField(bodyStr, "skills");
+        let jdOpt = Utils.extractStringField(bodyStr, "jobDescription");
         
         if (skillsStrOpt == null or jdOpt == null) {
            return errorResponse(400, "BAD_REQUEST", "Missing skills or jobDescription");
@@ -107,7 +109,7 @@ persistent actor class Backend(apiKey : Text) {
         let qaRes = await QAGenerator.generate(skillsArr, jd, apiKey);
         switch(qaRes) {
           case (#err e) return errorResponse(422, e.error, e.message);
-          case (#ok { qa = qaItems }) {
+          case (#ok { qa = qaItems; tokens }) {
              // FIXED: Nested loop to handle QAGroups and their QAItems
              var qaJson = "[";
              var i = 0;
@@ -138,7 +140,7 @@ persistent actor class Backend(apiKey : Text) {
                i += 1;
              };
              qaJson #= "]";
-             return jsonResponse(200, "{\"qa\": " # qaJson # "}");
+             return jsonResponse(200, "{\"qa\": " # qaJson # ", \"tokens\": " # Nat.toText(tokens) # "}");
           };
         };
       };
@@ -147,8 +149,8 @@ persistent actor class Backend(apiKey : Text) {
     };
 
   func handleProcess(bodyText : Text) : async HttpResponse {
-    let url = extractStringField(bodyText, "url");
-    let text = extractStringField(bodyText, "text");
+    let url = Utils.extractStringField(bodyText, "url");
+    let text = Utils.extractStringField(bodyText, "text");
 
     let jobDescription : Text = switch (url, text) {
       case (?u, _) {
@@ -260,55 +262,6 @@ persistent actor class Backend(apiKey : Text) {
       body = Text.encodeUtf8("{\"error\":" # jsonStr(error) # ",\"message\":" # jsonStr(message) # "}");
       upgrade = null;
     };
-  };
-
-  func arrayEq(chars : [Char], offset : Nat, sub : [Char]) : Bool {
-    let subLen = sub.size();
-    var k = 0;
-    while (k < subLen) {
-      if (chars[offset + k] != sub[k]) return false;
-      k += 1;
-    };
-    true;
-  };
-
-  func extractStringField(obj : Text, field : Text) : ?Text {
-    let key = "\"" # field # "\"";
-    let chars = Text.toArray(obj);
-    let keyChars = Text.toArray(key);
-    let keyLen = keyChars.size();
-    let len = chars.size();
-    var i = 0;
-    while (i + keyLen <= len) {
-      if (arrayEq(chars, i, keyChars)) {
-        var j = i + keyLen;
-        while (j < len and (chars[j] == ' ' or chars[j] == ':' or chars[j] == '\n' or chars[j] == '\r' or chars[j] == '\t')) { j += 1 };
-        if (j < len and chars[j] == '\"') {
-          j += 1;
-          var value = "";
-          var escape = false;
-          while (j < len) {
-            let c = chars[j];
-            if (escape) {
-              if (c == 'n') { value #= "\n" }
-              else if (c == 't') { value #= "\t" }
-              else if (c == 'r') { value #= "\r" }
-              else { value #= Text.fromChar(c) };
-              escape := false;
-            } else if (c == '\\') {
-              escape := true;
-            } else if (c == '\"') {
-              return ?value;
-            } else {
-              value #= Text.fromChar(c);
-            };
-            j += 1;
-          };
-        };
-      };
-      i += 1;
-    };
-    null;
   };
 
   type HttpRequest = {

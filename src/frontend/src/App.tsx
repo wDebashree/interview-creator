@@ -9,11 +9,14 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<QAGroup[] | null>(null);
+  // NEW: State to hold the total tokens used
+  const [tokensUsed, setTokensUsed] = useState<number | null>(null);
 
   async function handleSubmit(url: string, text: string) {
     setIsLoading(true);
     setError(null);
     setResults(null);
+    setTokensUsed(null); // Reset tokens on new submission
 
     try {
       const req = url ? { url } : { text };
@@ -23,6 +26,8 @@ export default function App() {
         setError(response.message || "An error occurred. Please try again.");
       } else {
         setResults(response.qa);
+        // NEW: Capture the tokens from the successful response
+        setTokensUsed(response.tokens);
       }
     } catch {
       setError("Failed to connect to the server. Please try again.");
@@ -82,6 +87,20 @@ export default function App() {
               </svg>
               <span>Analyzing job description and generating questions…</span>
             </div>
+          </div>
+        )}
+
+        {/* NEW: Token Display Banner */}
+        {tokensUsed !== null && !isLoading && (
+          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-center">
+            <p className="text-blue-800 text-sm font-medium flex items-center justify-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="16" x2="12" y2="12"></line>
+                <line x1="12" y1="8" x2="12.01" y2="8"></line>
+              </svg>
+              API Usage: {tokensUsed.toLocaleString()} tokens utilized
+            </p>
           </div>
         )}
 

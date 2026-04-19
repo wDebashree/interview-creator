@@ -8,6 +8,8 @@ import Cycles "mo:base/ExperimentalCycles";
 import Debug "mo:base/Debug";
 import Buffer "mo:base/Buffer";
 import Int "mo:base/Int";
+import Utils "Utils";
+import Result "mo:base/Result";
 
 module {
   public type QAItem = {
@@ -49,7 +51,7 @@ module {
 
   // let apiKey = "OPENAI_API_KEY";
 
-  public func generate(skills : [Text], jobDescription : Text, apiKey : Text) : async GenerateResult {
+  public func generate(skills: [Text], jobDescription: Text, apiKey: Text) : async Result.Result<{qa: [QAGroup]; tokens: Nat}, {error: Text; message: Text}> {
     if (skills.size() == 0) {
       return #err({ error = "INVALID_INPUT"; message = "skills is required" });
     };
@@ -82,11 +84,14 @@ module {
         case null #err({ error = "GENERATION_FAILED"; message = "Could not decode AI response" });
         case (?body) {
           Debug.print("QAGenerator Raw Response: " # body);
-          let qa = parseQAFromResponse(body);
-          if (qa.size() == 0) {
-            #err({ error = "GENERATION_FAILED"; message = "Q&A generation failed" });
+          // FIXED: Use 'body' instead of 'bodyStr'
+          let parsedData = parseQAFromResponse(body); 
+          
+          // FIXED: Check the size of the 'qa' array inside the record
+          if (parsedData.qa.size() == 0) {
+            return #err({ error = "GENERATION_FAILED"; message = "Q&A generation failed" });
           } else {
-            #ok({ qa = qa });
+            return #ok(parsedData);
           };
         };
       };
@@ -104,63 +109,98 @@ module {
     "\"" # e5 # "\"";
   };
 
-  // Parse JSON string field from an object snippet
-  func extractStringField(obj : Text, field : Text) : ?Text {
-    let key = "\"" # field # "\"";
-    let chars = Text.toArray(obj);
-    let keyChars = Text.toArray(key);
-    let keyLen = keyChars.size();
-    let len = chars.size();
+// 1. Parses the inner array of actual questions
+  func extractQAItems(groupStr : Text) : [QAItem] {
+    var items = Buffer.Buffer<QAItem>(4);
+    var depth = 0;
+    var objStart = 0;
     var i = 0;
-    while (i + keyLen <= len) {
-      if (arrayEq(chars, i, keyChars)) {
-        var j = i + keyLen;
-        while (j < len and (chars[j] == ' ' or chars[j] == ':' or chars[j] == '\n' or chars[j] == '\r' or chars[j] == '\t')) { j += 1 };
-        if (j < len and chars[j] == '\"') {
-          j += 1;
-          var value = "";
-          var escape = false;
-          while (j < len) {
-            let c = chars[j];
-            if (escape) {
-              if (c == 'n') { value #= "\n" }
-              else if (c == 't') { value #= "\t" }
-              else if (c == 'r') { value #= "\r" }
-              else { value #= Text.fromChar(c) };
-              escape := false;
-            } else if (c == '\\') {
-              escape := true;
-            } else if (c == '\"') {
-              return ?value;
-            } else {
-              value #= Text.fromChar(c);
+    var inQuestionsArray = false;
+    let chars = Text.toArray(groupStr);
+    let len = chars.size();
+    let questionsKey = Text.toArray("\"questions\"");
+
+    while (i + questionsKey.size() <= len) {
+      if (Utils.arrayEq(chars, i, questionsKey)) {
+        inQuestionsArray := true;
+        i += questionsKey.size();
+      } else {
+        if (inQuestionsArray) {
+          let c = chars[i];
+          if (c == '{') {
+            if (depth == 0) { objStart := i };
+            depth += 1;
+          } else if (c == '}') {
+            depth -= 1;
+            if (depth == 0) {
+              let itemObj = Utils.textSlice(groupStr, objStart, i + 1);
+              let q = Utils.extractStringField(itemObj, "question");
+              let a = Utils.extractStringField(itemObj, "answer");
+              switch (q, a) {
+                case (?question, ?answer) {
+                  items.add({ question; answer });
+                };
+                case _ {};
+              };
             };
-            j += 1;
+          };
+        };
+        i += 1;
+      };
+    };
+    Buffer.toArray(items);
+  };
+
+  // 2. Parses the outer array of skill groups
+  func extractQAGroups(obj : Text) : [QAGroup] {
+    var groups = Buffer.Buffer<QAGroup>(4);
+    var depth = 0;
+    var objStart = 0;
+    var i = 0;
+    let chars = Text.toArray(obj);
+    let len = chars.size();
+
+    while (i < len) {
+      let c = chars[i];
+      if (c == '{') {
+        if (depth == 0) { objStart := i };
+        depth += 1;
+      } else if (c == '}') {
+        depth -= 1;
+        if (depth == 0) {
+          // We found a complete skill group object!
+          let groupStr = Utils.textSlice(obj, objStart, i + 1);
+          let skillOpt = Utils.extractStringField(groupStr, "skill");
+          let questions = extractQAItems(groupStr); // Extract the questions from inside this group
+          switch (skillOpt) {
+            case (?skill) {
+              groups.add({ skill; questions });
+            };
+            case null {};
           };
         };
       };
       i += 1;
     };
-    null;
+    Buffer.toArray(groups);
   };
 
-
-  // Parse the top-level JSON array of QAGroup objects
-  func parseQAFromResponse(body : Text) : [QAGroup] {
-    // 1. First, extract the actual 'content' string from OpenAI's wrapper
-    let contentOpt = extractStringField(body, "content");
+  // 3. The main entry point
+  func parseQAFromResponse(body : Text) : { qa : [QAGroup]; tokens : Nat } {
+    let tokens = switch(Utils.extractNatField(body, "total_tokens")) { case (?t) t; case null 0 };
+    let contentOpt = Utils.extractStringField(body, "content");
     switch (contentOpt) {
-      case null return [];
+      case null return { qa = []; tokens };
       case (?content) {
-        // 2. Now find the JSON array inside the extracted, unescaped content
-        let start = findFirst(content, "[");
-        let end = findLast(content, "]");
+        let start = Utils.findFirst(content, "[");
+        let end = Utils.findLast(content, "]");
         switch (start, end) {
           case (?s, ?e) {
-            if (e <= s) return [];
-            parseQAArray(textSlice(content, s, e + 1));
+            if (e <= s) return { qa = []; tokens };
+            // FIXED: We now call extractQAGroups to return the correctly structured data
+            return { qa = extractQAGroups(Utils.textSlice(content, s, e + 1)); tokens };
           };
-          case _ return [];
+          case _ return { qa = []; tokens };
         };
       };
     };
@@ -198,7 +238,7 @@ module {
   };
 
   func parseQAGroup(obj : Text) : ?QAGroup {
-    let skill = extractStringField(obj, "skill");
+    let skill = Utils.extractStringField(obj, "skill");
     let questions = extractQAItems(obj);
     switch (skill) {
       case (?s) {
@@ -209,108 +249,5 @@ module {
     };
   };
 
-  func extractQAItems(obj : Text) : [QAItem] {
-    // FIXED: Use a dynamically sizing Buffer instead of an Array
-    var items = Buffer.Buffer<QAItem>(8); 
-    var depth = 0;
-    var objStart = 0;
-    var i = 0;
-    var inQuestionsArray = false;
-    let chars = Text.toArray(obj);
-    let len = chars.size();
-    let questionsKey = Text.toArray("\"questions\"");
-    
-    while (i + questionsKey.size() <= len) {
-      if (arrayEq(chars, i, questionsKey)) { 
-        inQuestionsArray := true;
-        i += questionsKey.size();
-      } else {
-        if (inQuestionsArray) {
-          let c = chars[i];
-          if (c == '{') {
-            if (depth == 0) { objStart := i };
-            depth += 1;
-          } else if (c == '}') {
-            depth -= 1;
-            if (depth == 0) {
-              let itemObj = textSlice(obj, objStart, i + 1);
-              let q = extractStringField(itemObj, "question");
-              let a = extractStringField(itemObj, "answer");
-              switch (q, a) {
-                case (?question, ?answer) {
-                  // FIXED: Safely add the item to the Buffer
-                  items.add({ question; answer });
-                };
-                case _ {};
-              };
-            };
-          };
-        };
-        i += 1;
-      };
-    };
-    // Convert the Buffer back to a standard Array before returning
-    Buffer.toArray(items);
-  };
-
-  func arrayEq(chars : [Char], offset : Nat, sub : [Char]) : Bool {
-    let subLen = sub.size();
-    var k = 0;
-    while (k < subLen) {
-      if (chars[offset + k] != sub[k]) return false;
-      k += 1;
-    };
-    true;
-  };
-
-  // Helper to slice a text string between two indices
-  func textSlice(t : Text, start : Nat, end : Nat) : Text {
-    let chars = Text.toArray(t);
-    if (start >= end) return "";
-    let actualEnd = if (end > chars.size()) chars.size() else end;
-    var res = "";
-    var i = start;
-    while (i < actualEnd) {
-      res #= Text.fromChar(chars[i]);
-      i += 1;
-    };
-    res;
-  };
-
-  // Helper to find the first occurrence of a substring
-  func findFirst(t : Text, sub : Text) : ?Nat {
-    let chars = Text.toArray(t);
-    let subChars = Text.toArray(sub);
-    let len = chars.size();
-    let subLen = subChars.size();
-    var i = 0;
-    while (i + subLen <= len) {
-      if (arrayEq(chars, i, subChars)) return ?i;
-      i += 1;
-    };
-    null;
-  };
-
-  // Helper to find the last occurrence of a substring safely using Int
-  func findLast(t : Text, sub : Text) : ?Nat {
-    let chars = Text.toArray(t);
-    let subChars = Text.toArray(sub);
-    
-    // Convert Nat to Int to allow safe subtraction and reverse looping
-    let lenInt : Int = chars.size();
-    let subLenInt : Int = subChars.size();
-    
-    if (lenInt < subLenInt) return null;
-
-    var i : Int = lenInt - subLenInt;
-    while (i >= 0) {
-      let idx = Int.abs(i); // Convert Int back to Nat for array indexing
-      if (arrayEq(chars, idx, subChars)) {
-        return ?idx;
-      };
-      i -= 1;
-    };
-    null;
-  };
 
 };

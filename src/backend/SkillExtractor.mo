@@ -8,6 +8,8 @@ import Error "mo:base/Error";
 import Cycles "mo:base/ExperimentalCycles";
 import Buffer "mo:base/Buffer";
 import Int "mo:base/Int";
+import Utils "Utils";
+import Result "mo:base/Result";
 
 module {
   public type ExtractResult = {
@@ -39,7 +41,7 @@ module {
 
  //  let apiKey = "OPENAI_API_KEY";
 
-  public func extract(jobDescription : Text, apiKey : Text) : async ExtractResult {
+  public func extract(jobDescription : Text, apiKey : Text) : async Result.Result<{skills: [Text]; tokens: Nat}, {error: Text; message: Text}> {
     if (jobDescription.size() == 0) {
       return #err({ error = "INVALID_INPUT"; message = "Field is required" });
     };
@@ -69,11 +71,14 @@ module {
         case null #err({ error = "EXTRACT_FAILED"; message = "Could not decode AI response" });
         case (?body) {
           Debug.print("OpenAI Raw Response: " # body);
-          let skills = parseSkillsFromResponse(body);
-          if (skills.size() == 0) {
-            #err({ error = "EXTRACT_FAILED"; message = "No technical skills identified" });
+          // FIXED: Use 'body' instead of 'bodyStr'
+          let parsedData = parseSkillsFromResponse(body);
+          
+          // FIXED: Check the size of the 'skills' array inside the record
+          if (parsedData.skills.size() == 0) {
+            return #err({ error = "EXTRACT_FAILED"; message = "No technical skills identified" });
           } else {
-            #ok({ skills = skills });
+            return #ok(parsedData);
           };
         };
       };
@@ -91,151 +96,22 @@ module {
     "\"" # e5 # "\"";
   };
 
-  func arrayEq(chars : [Char], offset : Nat, sub : [Char]) : Bool {
-    let subLen = sub.size();
-    var k = 0;
-    while (k < subLen) {
-      if (chars[offset + k] != sub[k]) return false;
-      k += 1;
-    };
-    true;
-  };
+  func parseSkillsFromResponse(body : Text) : { skills : [Text]; tokens : Nat } {
+    // Extract the token count from the JSON
+    let tokens = switch(Utils.extractNatField(body, "total_tokens")) { case (?t) t; case null 0 };
 
-  func textSlice(t : Text, start : Nat, end : Nat) : Text {
-    let chars = Text.toArray(t);
-    if (start >= end) return "";
-    let actualEnd = if (end > chars.size()) chars.size() else end;
-    var res = "";
-    var i = start;
-    while (i < actualEnd) {
-      res #= Text.fromChar(chars[i]);
-      i += 1;
-    };
-    res;
-  };
-
-  func findFirst(t : Text, sub : Text) : ?Nat {
-    let chars = Text.toArray(t);
-    let subChars = Text.toArray(sub);
-    let len = chars.size();
-    let subLen = subChars.size();
-    var i = 0;
-    while (i + subLen <= len) {
-      if (arrayEq(chars, i, subChars)) return ?i;
-      i += 1;
-    };
-    null;
-  };
-
-  func findLast(t : Text, sub : Text) : ?Nat {
-    let chars = Text.toArray(t);
-    let subChars = Text.toArray(sub);
-    let lenInt : Int = chars.size();
-    let subLenInt : Int = subChars.size();
-    if (lenInt < subLenInt) return null;
-    var i : Int = lenInt - subLenInt;
-    while (i >= 0) {
-      let idx = Int.abs(i);
-      if (arrayEq(chars, idx, subChars)) {
-        return ?idx;
-      };
-      i -= 1;
-    };
-    null;
-  };
-
-  func extractStringField(obj : Text, field : Text) : ?Text {
-    let key = "\"" # field # "\"";
-    let chars = Text.toArray(obj);
-    let keyChars = Text.toArray(key);
-    let keyLen = keyChars.size();
-    let len = chars.size();
-    var i = 0;
-    while (i + keyLen <= len) {
-      if (arrayEq(chars, i, keyChars)) {
-        var j = i + keyLen;
-        while (j < len and (chars[j] == ' ' or chars[j] == ':' or chars[j] == '\n' or chars[j] == '\r' or chars[j] == '\t')) { j += 1 };
-        if (j < len and chars[j] == '\"') {
-          j += 1;
-          var value = "";
-          var escape = false;
-          while (j < len) {
-            let c = chars[j];
-            if (escape) {
-              if (c == 'n') { value #= "\n" }
-              else if (c == 't') { value #= "\t" }
-              else if (c == 'r') { value #= "\r" }
-              else { value #= Text.fromChar(c) };
-              escape := false;
-            } else if (c == '\\') {
-              escape := true;
-            } else if (c == '\"') {
-              return ?value;
-            } else {
-              value #= Text.fromChar(c);
-            };
-            j += 1;
-          };
-        };
-      };
-      i += 1;
-    };
-    null;
-  };
-
-  func extractStringArray(obj : Text) : [Text] {
-    var items = Buffer.Buffer<Text>(8);
-    let chars = Text.toArray(obj);
-    let len = chars.size();
-    var i = 0;
-    var inQuotes = false;
-    var currentStr = "";
-    var escape = false;
-
-    while (i < len) {
-      let c = chars[i];
-      if (escape) {
-        if (c == 'n') { currentStr #= "\n" }
-        else if (c == 't') { currentStr #= "\t" }
-        else if (c == 'r') { currentStr #= "\r" }
-        else { currentStr #= Text.fromChar(c) };
-        escape := false;
-      } else if (c == '\\') {
-        escape := true;
-      } else if (c == '\"') {
-        if (inQuotes) {
-          items.add(currentStr);
-          currentStr := "";
-          inQuotes := false;
-        } else {
-          inQuotes := true;
-        };
-      } else {
-        if (inQuotes) {
-          currentStr #= Text.fromChar(c);
-        };
-      };
-      i += 1;
-    };
-    Buffer.toArray(items);
-  };
-
-  func parseSkillsFromResponse(body : Text) : [Text] {
-    // 1. Extract the actual 'content' string from OpenAI's wrapper
-    let contentOpt = extractStringField(body, "content");
+    let contentOpt = Utils.extractStringField(body, "content");
     switch (contentOpt) {
-      case null return [];
+      case null return { skills = []; tokens }; // Return both
       case (?content) {
-        // 2. Find the JSON array inside the extracted, unescaped content
-        let start = findFirst(content, "[");
-        let end = findLast(content, "]");
+        let start = Utils.findFirst(content, "[");
+        let end = Utils.findLast(content, "]");
         switch (start, end) {
           case (?s, ?e) {
-            if (e <= s) return [];
-            // 3. Extract the clean strings!
-            return extractStringArray(textSlice(content, s, e + 1));
+            if (e <= s) return { skills = []; tokens };
+            return { skills = Utils.extractStringArray(Utils.textSlice(content, s, e + 1)); tokens };
           };
-          case _ return [];
+          case _ return { skills = []; tokens };
         };
       };
     };
