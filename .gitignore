@@ -1,0 +1,14 @@
+# Internet Computer
+.dfx/
+*.wasm
+*.did.js
+*.did.d.ts
+
+# Node/JavaScript
+node_modules/
+src/frontend/node_modules/
+dist/
+src/frontend/dist/
+
+# Environment Variables
+.env
